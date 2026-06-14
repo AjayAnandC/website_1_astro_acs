@@ -5,6 +5,9 @@ const defaultData = {
   subscription: null,
 };
 
+let db = null;
+let isFirebaseEnabled = false;
+
 const state = loadState();
 
 const profileForm = document.getElementById("profileForm");
@@ -17,15 +20,26 @@ const appointmentsList = document.getElementById("appointmentsList");
 const reportContent = document.getElementById("reportContent");
 const planButtons = document.querySelectorAll(".plan-select");
 const messageToast = document.getElementById("messageToast");
+const authStatus = document.getElementById("authStatus");
+const signInForm = document.getElementById("signInForm");
+const signUpForm = document.getElementById("signUpForm");
+const signOutButton = document.getElementById("signOutButton");
+
+let auth = null;
+let currentUser = null;
 
 profileForm.addEventListener("submit", handleProfileSave);
-loadProfile.addEventListener("click", renderProfileInfo);
+loadProfile.addEventListener("click", handleLoadProfile);
 appointmentForm.addEventListener("submit", handleAppointmentBooking);
 planButtons.forEach((button) => button.addEventListener("click", handlePlanSelect));
 openSignup.addEventListener("click", () => scrollToSection("profile"));
 openLogin.addEventListener("click", () => scrollToSection("profile"));
+signInForm.addEventListener("submit", handleSignIn);
+signUpForm.addEventListener("submit", handleSignUp);
+signOutButton.addEventListener("click", handleSignOut);
 
 document.addEventListener("DOMContentLoaded", () => {
+  initFirebase();
   renderProfileInfo();
   renderAppointments();
   renderReport();
@@ -39,8 +53,79 @@ function loadState() {
   }
 }
 
+function initFirebase() {
+  try {
+    if (typeof firebase !== "undefined" && firebase.firestore && firebase.auth) {
+      db = firebase.firestore();
+      auth = firebase.auth();
+      isFirebaseEnabled = true;
+      auth.onAuthStateChanged(handleAuthStateChanged);
+      console.log("Firebase enabled");
+    }
+  } catch (error) {
+    console.warn("Firebase initialization failed", error);
+  }
+}
+
 function saveState() {
   localStorage.setItem(storageKey, JSON.stringify(state));
+}
+
+function handleAuthStateChanged(user) {
+  currentUser = user;
+
+  if (user) {
+    authStatus.textContent = `Signed in as ${user.email || "anonymous"}`;
+    authStatus.classList.add("signed-in");
+    authStatus.classList.remove("signed-out");
+    document.getElementById("profileEmail").value = user.email || "";
+  } else {
+    authStatus.textContent = "Not signed in.";
+    authStatus.classList.add("signed-out");
+    authStatus.classList.remove("signed-in");
+  }
+}
+
+async function handleSignIn(event) {
+  event.preventDefault();
+  const email = document.getElementById("signInEmail").value.trim();
+  const password = document.getElementById("signInPassword").value.trim();
+
+  if (!email || !password) {
+    showToast("Enter email and password to sign in.");
+    return;
+  }
+
+  try {
+    await auth.signInWithEmailAndPassword(email, password);
+    showToast("Successfully signed in.");
+  } catch (error) {
+    showToast(`Sign in failed: ${error.message}`);
+  }
+}
+
+async function handleSignUp(event) {
+  event.preventDefault();
+  const email = document.getElementById("signUpEmail").value.trim();
+  const password = document.getElementById("signUpPassword").value.trim();
+
+  if (!email || !password) {
+    showToast("Enter email and password to create an account.");
+    return;
+  }
+
+  try {
+    await auth.createUserWithEmailAndPassword(email, password);
+    showToast("Account created and signed in.");
+  } catch (error) {
+    showToast(`Sign up failed: ${error.message}`);
+  }
+}
+
+async function handleSignOut() {
+  if (!auth) return;
+  await auth.signOut();
+  showToast("Signed out.");
 }
 
 function handleProfileSave(event) {
@@ -58,8 +143,21 @@ function handleProfileSave(event) {
 
   state.profile = { name, email, birthdate, zodiac, birthtime, savedAt: new Date().toISOString() };
   saveState();
+
+  if (isFirebaseEnabled && currentUser) {
+    saveProfileToFirestore(currentUser.uid, state.profile).then(() => {
+      showToast("Profile saved successfully and synced to Firebase.");
+    }).catch((error) => {
+      console.error("Firebase profile save error:", error);
+      showToast("Profile saved locally, but Firebase sync failed.");
+    });
+  } else if (isFirebaseEnabled && !currentUser) {
+    showToast("Please sign in before saving your profile.");
+  } else {
+    showToast("Profile saved successfully.");
+  }
+
   renderProfileInfo();
-  showToast("Profile saved successfully.");
 }
 
 function handleAppointmentBooking(event) {
@@ -75,7 +173,7 @@ function handleAppointmentBooking(event) {
     return;
   }
 
-  state.appointments.unshift({
+  const appointment = {
     id: crypto.randomUUID(),
     name,
     email,
@@ -83,11 +181,25 @@ function handleAppointmentBooking(event) {
     time,
     topic,
     createdAt: new Date().toISOString(),
-  });
+  };
+
+  state.appointments.unshift(appointment);
   saveState();
   appointmentForm.reset();
   renderAppointments();
-  showToast("Appointment booked successfully.");
+
+  if (isFirebaseEnabled && currentUser) {
+    saveAppointmentToFirestore(appointment).then(() => {
+      showToast("Appointment booked successfully and synced to Firebase.");
+    }).catch((error) => {
+      console.error("Firebase appointment save error:", error);
+      showToast("Appointment booked locally, but Firebase sync failed.");
+    });
+  } else if (isFirebaseEnabled && !currentUser) {
+    showToast("Please sign in before booking an appointment.");
+  } else {
+    showToast("Appointment booked successfully.");
+  }
 }
 
 function handlePlanSelect(event) {
@@ -158,6 +270,49 @@ function renderReport() {
     <p>${generateReportText(subscription.plan, profile)}</p>
     <p class="muted">Based on your sign <strong>${escapeHtml(profile.zodiac)}</strong> and your chosen plan.</p>
   `;
+}
+
+function handleLoadProfile() {
+  if (!state.profile) {
+    showToast("No profile saved locally yet.");
+    return;
+  }
+
+  if (isFirebaseEnabled && state.profile.email) {
+    loadProfileFromFirestore(state.profile.email)
+      .then((profile) => {
+        if (profile) {
+          state.profile = profile;
+          saveState();
+          renderProfileInfo();
+          showToast("Profile loaded from Firebase.");
+        } else {
+          showToast("No profile found in Firebase, showing local profile.");
+        }
+      })
+      .catch(() => {
+        showToast("Failed to load profile from Firebase.");
+      });
+  } else {
+    renderProfileInfo();
+    showToast("Loaded local profile.");
+  }
+}
+
+async function saveProfileToFirestore(uid, profile) {
+  if (!db || !uid) throw new Error("Firebase not configured");
+  await db.collection("profiles").doc(uid).set(profile);
+}
+
+async function saveAppointmentToFirestore(appointment) {
+  if (!db) throw new Error("Firebase not configured");
+  await db.collection("appointments").add(appointment);
+}
+
+async function loadProfileFromFirestore(email) {
+  if (!db || !email) throw new Error("Firebase not configured");
+  const doc = await db.collection("profiles").doc(email).get();
+  return doc.exists ? doc.data() : null;
 }
 
 function generateReportText(plan, profile) {
