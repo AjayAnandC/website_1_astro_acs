@@ -19,6 +19,17 @@ const appointmentForm = document.getElementById("appointmentForm");
 const appointmentsList = document.getElementById("appointmentsList");
 const reportContent = document.getElementById("reportContent");
 const planButtons = document.querySelectorAll(".plan-select");
+const chatForm = document.getElementById("chatForm");
+const chatInput = document.getElementById("chatInput");
+const chatMessages = document.getElementById("chatMessages");
+const chatSendButton = document.getElementById("chatSendButton");
+const chatWindow = document.getElementById("chatWindow");
+const chatToggle = document.getElementById("chatToggle");
+const chatClose = document.getElementById("chatClose");
+const chatLoginButton = document.getElementById("chatLoginButton");
+const chatLocked = document.getElementById("chatLocked");
+const chatLauncherLock = document.getElementById("chatLauncherLock");
+const chatStatusText = document.getElementById("chatStatusText");
 const messageToast = document.getElementById("messageToast");
 const authStatus = document.getElementById("authStatus");
 const signInForm = document.getElementById("signInForm");
@@ -27,6 +38,8 @@ const signOutButton = document.getElementById("signOutButton");
 
 let auth = null;
 let currentUser = null;
+let chatHistory = [];
+const apiBaseUrl = (window.ASTRO_API_BASE_URL || "").replace(/\/+$/, "");
 
 profileForm.addEventListener("submit", handleProfileSave);
 loadProfile.addEventListener("click", handleLoadProfile);
@@ -37,12 +50,24 @@ openLogin.addEventListener("click", () => scrollToSection("profile"));
 signInForm.addEventListener("submit", handleSignIn);
 signUpForm.addEventListener("submit", handleSignUp);
 signOutButton.addEventListener("click", handleSignOut);
+chatForm.addEventListener("submit", handleChatSubmit);
+chatToggle.addEventListener("click", toggleChatWindow);
+chatClose.addEventListener("click", closeChatWindow);
+chatLoginButton.addEventListener("click", () => {
+  closeChatWindow();
+  scrollToSection("profile");
+  document.getElementById("signInEmail").focus({ preventScroll: true });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !chatWindow.hidden) closeChatWindow();
+});
 
 document.addEventListener("DOMContentLoaded", () => {
   initFirebase();
   renderProfileInfo();
   renderAppointments();
   renderReport();
+  updateAiAccess();
 });
 
 function loadState() {
@@ -72,7 +97,13 @@ function saveState() {
 }
 
 function handleAuthStateChanged(user) {
+  const userChanged = currentUser?.uid !== user?.uid;
   currentUser = user;
+
+  if (userChanged) {
+    chatHistory = [];
+    renderChatIntro();
+  }
 
   if (user) {
     authStatus.textContent = `Signed in as ${user.email || "anonymous"}`;
@@ -84,6 +115,7 @@ function handleAuthStateChanged(user) {
     authStatus.classList.add("signed-out");
     authStatus.classList.remove("signed-in");
   }
+  updateAiAccess();
 }
 
 async function handleSignIn(event) {
@@ -202,12 +234,45 @@ function handleAppointmentBooking(event) {
   }
 }
 
-function handlePlanSelect(event) {
-  const plan = event.currentTarget.dataset.plan;
-  state.subscription = { plan, selectedAt: new Date().toISOString() };
-  saveState();
-  renderReport();
-  showToast(`${capitalize(plan)} subscription activated.`);
+async function handlePlanSelect(event) {
+  const button = event.currentTarget;
+  const plan = button.dataset.plan;
+  if (!currentUser) {
+    showToast("Sign in before generating a personal reading.");
+    scrollToSection("profile");
+    return;
+  }
+
+  const profile = getProfileForCurrentUser();
+  if (!profile?.zodiac) {
+    showToast("Save a profile with your zodiac sign before generating a reading.");
+    scrollToSection("profile");
+    return;
+  }
+
+  button.disabled = true;
+  reportContent.textContent = "Preparing your reading…";
+  reportContent.classList.add("is-loading");
+
+  try {
+    const result = await requestAi("/api/ai/reports", {
+      plan,
+      zodiac: profile.zodiac,
+    });
+    if (typeof result.report !== "string" || !result.report.trim()) {
+      throw new Error("The AI service returned an empty reading. Please try again.");
+    }
+    state.subscription = { plan, selectedAt: new Date().toISOString() };
+    saveState();
+    renderGeneratedReport(`${capitalize(plan)} reading`, result.report);
+    renderProfileInfo();
+  } catch (error) {
+    reportContent.textContent = error.message;
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    reportContent.classList.remove("is-loading");
+  }
 }
 
 function renderProfileInfo() {
@@ -230,7 +295,7 @@ function renderProfileInfo() {
       <strong>Birth date:</strong> ${escapeHtml(state.profile.birthdate)}
     </div>
     <div class="dashboard-item">
-      <strong>Subscription:</strong> ${state.subscription ? capitalize(state.subscription.plan) : "None"}
+      <strong>Latest reading:</strong> ${state.subscription ? capitalize(state.subscription.plan) : "None"}
     </div>
     <div class="dashboard-item">
       <strong>Saved:</strong> ${new Date(state.profile.savedAt).toLocaleString()}</div>
@@ -252,34 +317,17 @@ function renderAppointments() {
 }
 
 function renderReport() {
-  const subscription = state.subscription;
-
-  if (!subscription) {
-    reportContent.innerHTML = `<p>No subscription selected yet. Choose Daily, Weekly, or Monthly to receive your horoscope report.</p>`;
-    return;
-  }
-
-  const profile = state.profile;
-  if (!profile) {
-    reportContent.innerHTML = `<p>Create your profile to personalize report recommendations.</p>`;
-    return;
-  }
-
-  reportContent.innerHTML = `
-    <h4>${capitalize(subscription.plan)} astrology report</h4>
-    <p>${generateReportText(subscription.plan, profile)}</p>
-    <p class="muted">Based on your sign <strong>${escapeHtml(profile.zodiac)}</strong> and your chosen plan.</p>
-  `;
+  reportContent.textContent = "Choose a reading above to receive a fresh reflection based on your zodiac sign.";
 }
 
 function handleLoadProfile() {
-  if (!state.profile) {
+  if (!state.profile && !(isFirebaseEnabled && currentUser)) {
     showToast("No profile saved locally yet.");
     return;
   }
 
-  if (isFirebaseEnabled && state.profile.email) {
-    loadProfileFromFirestore(state.profile.email)
+  if (isFirebaseEnabled && currentUser) {
+    loadProfileFromFirestore(currentUser.uid)
       .then((profile) => {
         if (profile) {
           state.profile = profile;
@@ -290,7 +338,8 @@ function handleLoadProfile() {
           showToast("No profile found in Firebase, showing local profile.");
         }
       })
-      .catch(() => {
+      .catch((error) => {
+        console.error("Firebase profile load error:", error);
         showToast("Failed to load profile from Firebase.");
       });
   } else {
@@ -309,56 +358,164 @@ async function saveAppointmentToFirestore(appointment) {
   await db.collection("appointments").add(appointment);
 }
 
-async function loadProfileFromFirestore(email) {
-  if (!db || !email) throw new Error("Firebase not configured");
-  const doc = await db.collection("profiles").doc(email).get();
+async function loadProfileFromFirestore(uid) {
+  if (!db || !uid) throw new Error("Firebase not configured");
+  const doc = await db.collection("profiles").doc(uid).get();
   return doc.exists ? doc.data() : null;
 }
 
-function generateReportText(plan, profile) {
-  const base = `Hello ${profile.name}, your ${profile.zodiac} energy is ready to guide you.`;
-  const insights = {
-    daily: `Today is a great day to trust your intuition and stay present. Watch for small opportunities in relationships and self-care.`,
-    weekly: `This week invites balance between work and personal growth. Focus on meaningful conversations and clear intentions.`,
-    monthly: `This month brings momentum for long-term change. Set goals, review your values, and move forward with confidence.`,
-  };
-
-  const custom = getCustomMessage(profile.zodiac, plan);
-  return `${base} ${insights[plan]} ${custom}`;
+function getProfileForCurrentUser() {
+  if (!currentUser?.email || !state.profile?.email) return null;
+  return state.profile.email.toLowerCase() === currentUser.email.toLowerCase()
+    ? state.profile
+    : null;
 }
 
-function getCustomMessage(zodiac, plan) {
-  const seed = zodiac.toLowerCase();
-  const messages = {
-    aries: {
-      daily: `Trust your leadership instincts, but also let others share the spotlight.`,
-      weekly: `Bold action brings progress, especially when you stay patient with timing.`,
-      monthly: `Your bold vision is strong this month — build momentum and nurture your energy reserves.`,
-    },
-    taurus: {
-      daily: `Comfort and stability are available when you remain rooted in your values.`,
-      weekly: `Slow, steady progress rewards your patience and attention to detail.`,
-      monthly: `Focus on what feels grounded and sustainable; your steady choices create resilience.`,
-    },
-    gemini: {
-      daily: `Curiosity will be your strength today — listen closely and ask more questions.`,
-      weekly: `Communication flows best when you balance ideas with careful listening.`,
-      monthly: `Your adaptability opens opportunities; choose clarity over distraction.`,
-    },
-    cancer: {
-      daily: `Emotional wisdom brings calm; honor your boundaries and practice self-care.`,
-      weekly: `Allow yourself to receive support from trusted people around you.`,
-      monthly: `Deep feelings guide you this month — nurture your home and personal dreams.`,
-    },
-  };
+async function handleChatSubmit(event) {
+  event.preventDefault();
+  const message = chatInput.value.trim();
+  if (!message) return;
+  if (!currentUser) {
+    showToast("Sign in before starting a conversation.");
+    return;
+  }
 
-  const defaultMessages = {
-    daily: `You may find meaningful energy in little rituals and thoughtful pauses.`,
-    weekly: `This is a strong week for setting clear routines and honoring your pace.`,
-    monthly: `A new cycle encourages you to reflect on growth and align with your inner purpose.`,
-  };
+  const profile = getProfileForCurrentUser();
+  const history = [...chatHistory];
+  appendChatMessage("user", message);
+  chatInput.value = "";
+  chatInput.disabled = true;
+  chatSendButton.disabled = true;
+  chatMessages.setAttribute("aria-busy", "true");
+  const pendingMessage = appendChatMessage("assistant", "Thinking…", "chat-pending");
 
-  return messages[seed]?.[plan] || defaultMessages[plan];
+  try {
+    const result = await requestAi("/api/ai/chat", {
+      message,
+      history,
+      ...(profile?.zodiac ? { zodiac: profile.zodiac } : {}),
+    });
+    if (typeof result.reply !== "string" || !result.reply.trim()) {
+      throw new Error("The AI service returned an empty reply. Please try again.");
+    }
+    pendingMessage.textContent = result.reply;
+    pendingMessage.classList.remove("chat-pending");
+    chatHistory.push(
+      { role: "user", content: message },
+      { role: "assistant", content: result.reply },
+    );
+    chatHistory = chatHistory.slice(-12);
+  } catch (error) {
+    pendingMessage.textContent = error.message;
+    pendingMessage.classList.remove("chat-pending");
+    pendingMessage.classList.add("chat-error");
+    showToast(error.message);
+  } finally {
+    chatInput.disabled = false;
+    chatSendButton.disabled = false;
+    chatMessages.setAttribute("aria-busy", "false");
+    chatInput.focus();
+  }
+}
+
+async function requestAi(path, payload) {
+  if (!currentUser) throw new Error("Sign in before using AI features.");
+
+  let response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await currentUser.getIdToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error("AI request could not reach the backend:", error);
+    throw new Error("Could not reach the AI service. Please try again.");
+  }
+
+  const body = await response.text();
+  let result;
+  try {
+    result = JSON.parse(body);
+  } catch (error) {
+    console.error("AI backend returned an invalid response:", error);
+    throw new Error("The AI service returned an unreadable response. Please try again.");
+  }
+
+  if (!response.ok) {
+    throw new Error(result.detail || "AI generation failed. Please try again.");
+  }
+  return result;
+}
+
+function renderGeneratedReport(title, content) {
+  reportContent.replaceChildren();
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  const reading = document.createElement("p");
+  reading.className = "generated-reading";
+  reading.textContent = content;
+  reportContent.append(heading, reading);
+}
+
+function renderChatIntro() {
+  chatMessages.replaceChildren();
+  const intro = document.createElement("p");
+  intro.className = "chat-empty";
+  intro.textContent = "Welcome. What would you like to explore today?";
+  chatMessages.append(intro);
+}
+
+function appendChatMessage(role, content, extraClass = "") {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble ${role === "user" ? "chat-user" : "chat-assistant"} ${extraClass}`.trim();
+  bubble.setAttribute("aria-label", role === "user" ? "You" : "Astro ACS");
+  bubble.textContent = content;
+  chatMessages.append(bubble);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return bubble;
+}
+
+function updateAiAccess() {
+  const signedIn = Boolean(currentUser);
+  chatLocked.hidden = signedIn;
+  chatMessages.hidden = !signedIn;
+  chatForm.hidden = !signedIn;
+  chatInput.disabled = !signedIn;
+  chatSendButton.disabled = !signedIn;
+  chatLauncherLock.hidden = signedIn;
+  chatStatusText.textContent = signedIn
+    ? "Your private space is ready"
+    : "Sign in to begin a conversation";
+  chatToggle.setAttribute("aria-label", signedIn ? "Open astrology chat" : "Open astrology chat — sign in required");
+  chatInput.placeholder = signedIn
+    ? "What’s on your mind?"
+    : "Sign in to start a conversation";
+  planButtons.forEach((button) => {
+    button.disabled = !signedIn;
+  });
+}
+
+function toggleChatWindow() {
+  const shouldOpen = chatWindow.hidden;
+  chatWindow.hidden = !shouldOpen;
+  chatToggle.setAttribute("aria-expanded", String(shouldOpen));
+  if (shouldOpen) {
+    window.requestAnimationFrame(() => {
+      (currentUser ? chatInput : chatLoginButton).focus({ preventScroll: true });
+    });
+  } else {
+    chatToggle.focus({ preventScroll: true });
+  }
+}
+
+function closeChatWindow() {
+  chatWindow.hidden = true;
+  chatToggle.setAttribute("aria-expanded", "false");
+  chatToggle.focus({ preventScroll: true });
 }
 
 function formatDate(value) {
