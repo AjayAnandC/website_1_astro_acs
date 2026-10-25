@@ -117,15 +117,14 @@ svg {
 }
 
 .brand-symbol {
-  display: grid;
+  display: block;
   width: 38px;
   height: 38px;
-  place-items: center;
   border: 1px solid rgba(197, 167, 255, 0.3);
   border-radius: 50%;
-  background: linear-gradient(145deg, rgba(197, 167, 255, 0.17), rgba(229, 183, 216, 0.06));
-  color: var(--lavender);
-  font-size: 1.2rem;
+  background: #f1e4c8;
+  box-shadow: 0 3px 12px rgba(54, 36, 47, 0.13);
+  object-fit: cover;
 }
 
 .brand-name {
@@ -1637,8 +1636,8 @@ body::before {
 
 .brand-symbol {
   border-color: rgba(181, 139, 78, 0.33);
-  background: linear-gradient(145deg, rgba(210, 181, 126, 0.22), rgba(121, 84, 121, 0.07));
-  color: #a77c3e;
+  background: #f1e4c8;
+  box-shadow: 0 3px 12px rgba(54, 36, 47, 0.13);
 }
 
 .site-nav a {
