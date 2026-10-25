@@ -7,6 +7,10 @@ __pycache__/
 *.sqlite3
 .DS_Store
 /.vscode/
+
+# Local secrets
+.env
+backend/.env
 node_modules/
 
 # Logs

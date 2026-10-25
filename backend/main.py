@@ -1,8 +1,15 @@
-from typing import Optional, List
 import os
+from typing import List, Optional
 
+from sqlalchemy import Column, String
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, create_engine, Session, select
+
+load_dotenv()
+
+from ai import router as ai_router
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -16,10 +23,30 @@ class Project(SQLModel, table=True):
     status: Optional[str] = "active"
     owner: Optional[str] = None
     tags: Optional[str] = None  # comma-separated tags
-    metadata: Optional[str] = None  # optional JSON string for extra data
+    metadata_: Optional[str] = Field(
+        default=None,
+        alias="metadata",
+        sa_column=Column("metadata", String),
+    )
 
 
-app = FastAPI(title="Projects API")
+app = FastAPI(title="Astro ACS API")
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "https://www.astroacs.com,https://astroacs.com,http://localhost:8000,http://127.0.0.1:5500",
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+app.include_router(ai_router)
 
 
 @app.on_event("startup")
